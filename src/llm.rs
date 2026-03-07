@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 use llama_cpp_2::model::AddBos;
 use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 
 use crate::rag;
 
@@ -27,7 +26,9 @@ pub struct LlmResponse {
 
 impl Engine {
     pub fn new(model_path: &PathBuf) -> Result<Self> {
-        let backend = LlamaBackend::init()?;
+        let mut backend = LlamaBackend::init()?;
+        // Suppress all verbose C++ internal logs (tensor loading, kv-cache, repack output, etc.)
+        backend.void_logs();
         let model_params = LlamaModelParams::default();
         let model = LlamaModel::load_from_file(&backend, model_path, &model_params)?;
 
