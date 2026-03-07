@@ -85,7 +85,7 @@ Only return valid JSON, no markdown formatting."#;
 
         // Very basic sampler loop
         let mut n_decoded = 0;
-        let max_tokens = 500;
+        let max_tokens = 1024; // increased to avoid truncation
         let mut decoder = encoding_rs::UTF_8.new_decoder();
 
         // Prevent repetitive output strings by applying a repeat penalty
@@ -117,24 +117,42 @@ Only return valid JSON, no markdown formatting."#;
             n_decoded += 1;
         }
 
-        // Parse resulting JSON loosely
-        let mut text = generated_text.trim();
-        
-        // Strip out reasoning tokens from models like DeepSeek-R1 or Qwen distilled variants
-        if let Some(idx) = text.find("</think>") {
-            text = text[idx + 8..].trim();
-        }
+        // --- Robust JSON extraction ---
+        let raw = generated_text.trim();
 
-        // Since LLMs sometimes format with markdown like ```json ... ```, strip it
-        let clean = text
+        // 1. Strip reasoning tokens <think>...</think> 
+        let after_think = if let Some(idx) = raw.find("</think>") {
+            raw[idx + 8..].trim()
+        } else {
+            raw
+        };
+
+        // 2. Strip markdown code fences
+        let clean_str = after_think
             .replace("```json", "")
-            .replace("```", "")
-            .trim()
-            .to_string();
+            .replace("```", "");
+        let clean_str = clean_str.trim();
 
-        let response: LlmResponse = serde_json::from_str(&clean).unwrap_or_else(|_| LlmResponse {
+        // 3. Extract the JSON object boundaries (find first `{` and last `}`)
+        let json_str = if let (Some(start), Some(end)) = (clean_str.find('{'), clean_str.rfind('}')) {
+            clean_str[start..=end].to_string()
+        } else if let Some(start) = clean_str.find('{') {
+            // Truncated JSON: auto-close it
+            let mut truncated = clean_str[start..].to_string();
+            // Close any unclosed string first
+            let open_quotes = truncated.chars().filter(|&c| c == '"').count();
+            if open_quotes % 2 != 0 {
+                truncated.push('"');
+            }
+            truncated.push('}');
+            truncated
+        } else {
+            clean_str.to_string()
+        };
+
+        let response: LlmResponse = serde_json::from_str(&json_str).unwrap_or_else(|_| LlmResponse {
             is_command: false,
-            text: "Failed to parse json. Raw output: ".to_string() + text,
+            text: format!("Failed to parse json. Raw output: {}", raw),
         });
 
         Ok(response)
