@@ -5,25 +5,19 @@ use std::process::Stdio;
 use crate::llm::Engine;
 
 pub async fn run_oneshot(engine: &Engine, request: &str) -> Result<()> {
-    // Determine if it's a direct command or chat. The engine handles this.
-    // For now, let's assume one-shot request mostly wants commands.
     let response = engine.generate_response(request).await?;
 
-    // We expect a JSON response from the LLM or a structured enum.
-    // For simplicity here, let's say the engine returns the command string if it's a command,
-    // or plain text if it's a chat response.
-    if response.is_command {
+    if !response.text.is_empty() {
         execute_command_with_confirmation(&response.text)?;
     } else {
-        println!("\nAI: {}", response.text);
+        println!("No command generated.");
     }
 
     Ok(())
 }
 
 pub fn execute_command_with_confirmation(command: &str) -> Result<()> {
-    println!("\nProposed Command:\n\x1b[1;32m{}\x1b[0m\n", command);
-
+    println!();
     if Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt("Do you want to execute this command?")
         .default(false)

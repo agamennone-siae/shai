@@ -11,6 +11,9 @@ use std::path::PathBuf;
 use llama_cpp_2::model::AddBos;
 use llama_cpp_2::sampling::LlamaSampler;
 
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::{self, Write};
+
 use crate::rag;
 
 pub struct Engine {
@@ -39,12 +42,9 @@ impl Engine {
         // Build the system prompt indicating JSON output is expected
         // with intent classification.
         let system_prompt = r#"You are shai, an AI CLI reasoning engine.
-If the user wants a CLI command to be executed, return a JSON object: 
-{ "is_command": true, "text": "<the bash command directly without backticks>" }
-If they're just chatting or asking for info, return:
-{ "is_command": false, "text": "<the text response>" }
-
-Only return valid JSON, no markdown formatting."#;
+Your sole purpose is to provide the exact bash command for the user's request.
+Return ONLY the command itself, with no explanations, no markdown code blocks, and no JSON formatting.
+If multiple steps are needed, provide a single line command or a script-like string."#;
 
         // Try to identify a command from the user request and fetch RAG context
         let context_str = if let Some(cmd) = rag::guess_command(prompt) {
@@ -98,6 +98,15 @@ Only return valid JSON, no markdown formatting."#;
         // Feed the prompt tokens into the sampler so it knows what to penalize
         sampler.accept_many(tokens.iter().copied());
 
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .template("{spinner:.green} {msg}")?,
+        );
+        pb.set_message("Thinking...");
+        let mut thinking = false;
+
         while n_decoded < max_tokens {
             let next_token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(next_token);
@@ -109,6 +118,30 @@ Only return valid JSON, no markdown formatting."#;
             let token_str = self
                 .model
                 .token_to_piece(next_token, &mut decoder, false, None)?;
+            
+            if token_str.contains("<think>") {
+                thinking = true;
+                pb.set_message("Thinking deeply...");
+            }
+
+            if thinking {
+                if token_str.contains("</think>") {
+                    thinking = false;
+                    pb.finish_and_clear();
+                    // Don't print the </think> token itself, or anything before it
+                }
+            } else {
+                // Only start printing if we are not thinking and haven't seen <think> in this token
+                if !token_str.contains("<think>") {
+                    if !pb.is_finished() {
+                        pb.finish_and_clear();
+                        print!("\n[Command] ");
+                    }
+                    print!("{}", token_str);
+                    io::stdout().flush()?;
+                }
+            }
+
             generated_text.push_str(&token_str);
 
             batch.clear();
@@ -118,44 +151,31 @@ Only return valid JSON, no markdown formatting."#;
             n_decoded += 1;
         }
 
-        // --- Robust JSON extraction ---
-        let raw = generated_text.trim();
+        if !pb.is_finished() {
+            pb.finish_and_clear();
+        }
 
-        // 1. Strip reasoning tokens <think>...</think> 
-        let after_think = if let Some(idx) = raw.find("</think>") {
-            raw[idx + 8..].trim()
-        } else {
-            raw
-        };
-
-        // 2. Strip markdown code fences
-        let clean_str = after_think
-            .replace("```json", "")
-            .replace("```", "");
-        let clean_str = clean_str.trim();
-
-        // 3. Extract the JSON object boundaries (find first `{` and last `}`)
-        let json_str = if let (Some(start), Some(end)) = (clean_str.find('{'), clean_str.rfind('}')) {
-            clean_str[start..=end].to_string()
-        } else if let Some(start) = clean_str.find('{') {
-            // Truncated JSON: auto-close it
-            let mut truncated = clean_str[start..].to_string();
-            // Close any unclosed string first
-            let open_quotes = truncated.chars().filter(|&c| c == '"').count();
-            if open_quotes % 2 != 0 {
-                truncated.push('"');
+        // Clean up the text: remove anything inside and including <think> tags
+        let mut final_text = generated_text.clone();
+        if let Some(start_idx) = final_text.find("<think>") {
+            if let Some(end_idx) = final_text.find("</think>") {
+                final_text.replace_range(start_idx..end_idx + 8, "");
+            } else {
+                // If it's unfinished, just remove from <think> onwards
+                final_text.truncate(start_idx);
             }
-            truncated.push('}');
-            truncated
-        } else {
-            clean_str.to_string()
-        };
+        }
 
-        let response: LlmResponse = serde_json::from_str(&json_str).unwrap_or_else(|_| LlmResponse {
-            is_command: false,
-            text: format!("Failed to parse json. Raw output: {}", raw),
-        });
+        let clean_text = final_text.trim()
+            .replace("```bash", "")
+            .replace("```json", "")
+            .replace("```", "")
+            .trim()
+            .to_string();
 
-        Ok(response)
+        Ok(LlmResponse {
+            is_command: true,
+            text: clean_text,
+        })
     }
 }
